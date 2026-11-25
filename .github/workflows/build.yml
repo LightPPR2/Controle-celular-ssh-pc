@@ -1,26 +1,72 @@
+```yaml
 name: Build APK
+
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Flutter
+        uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
-      - name: Criar estrutura Android e compilar
+          channel: stable
+
+      - name: Criar estrutura Android
         run: |
-          flutter create . --platforms=android --project-name controle_celular_ssh_pc
-          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
-          sed -i 's/android:label="[^"]*"/android:label="Controle SSH Pc"/' android/app/src/main/AndroidManifest.xml
-          flutter pub get
-          flutter build apk --release
+          flutter create . \
+            --platforms=android \
+            --project-name controle_celular_ssh_pc
+
+      - name: Configurar AndroidManifest
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          content = manifest.read_text()
+
+          permission = '<uses-permission android:name="android.permission.INTERNET"/>'
+
+          if permission not in content:
+              content = content.replace(
+                  '<application',
+                  f'    {permission}\n    <application',
+                  1
+              )
+
+          content = content.replace(
+              'android:label="Runner"',
+              'android:label="LightPPR2 SSH"'
+          )
+
+          manifest.write_text(content)
+          PY
+
+      - name: Instalar dependências
+        run: flutter pub get
+
+      - name: Analisar código
+        run: flutter analyze
+
+      - name: Compilar APK
+        run: flutter build apk --release
+
       - name: Disponibilizar APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-controle-ssh
+          name: LightPPR2-SSH
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+```
