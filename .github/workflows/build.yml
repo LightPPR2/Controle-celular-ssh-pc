@@ -16,6 +16,7 @@ jobs:
         run: |
           flutter create . --platforms=android --project-name controle_celular_ssh_pc
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/android:label="[^"]*"/android:label="Controle SSH Pc"/' android/app/src/main/AndroidManifest.xml
           flutter pub get
           flutter build apk --release
       - name: Disponibilizar APK
@@ -23,4 +24,3 @@ jobs:
         with:
           name: app-controle-ssh
           path: build/app/outputs/flutter-apk/app-release.apk
-          
