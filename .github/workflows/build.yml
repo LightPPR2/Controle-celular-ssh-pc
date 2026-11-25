@@ -14,7 +14,7 @@ jobs:
           channel: 'stable'
       - name: Criar estrutura Android e compilar
         run: |
-          flutter create . --platforms=android
+          flutter create . --platforms=android --project-name controle_celular_ssh_pc
           sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application/' android/app/src/main/AndroidManifest.xml
           flutter pub get
           flutter build apk --release
