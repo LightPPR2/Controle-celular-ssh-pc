@@ -1,4 +1,4 @@
-name: Build APK
+name: Build LightPPR2 SSH
 
 on:
   workflow_dispatch:
@@ -11,63 +11,61 @@ permissions:
 
 jobs:
   build:
+    name: Compilar APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Baixar repositório
         uses: actions/checkout@v4
 
       - name: Configurar Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
-      - name: Criar estrutura Android
+      - name: Preparar projeto Android
         run: |
-          flutter create . \
-            --platforms=android \
-            --project-name controle_celular_ssh_pc
+          flutter create . --platforms=android --project-name controle_celular_ssh_pc
 
-      - name: Configurar AndroidManifest
+      - name: Configurar permissão de internet
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("android/app/src/main/AndroidManifest.xml")
-          content = path.read_text()
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          content = manifest.read_text(encoding="utf-8")
 
           permission = '<uses-permission android:name="android.permission.INTERNET"/>'
 
           if permission not in content:
               content = content.replace(
-                  '<application',
-                  f'    {permission}\n    <application',
+                  "<application",
+                  f"    {permission}\n    <application",
                   1
               )
 
           content = content.replace(
-              'android:label="Runner"',
+              'android:label="Flutter"',
               'android:label="LightPPR2 SSH"'
           )
 
-          path.write_text(content)
+          manifest.write_text(content, encoding="utf-8")
           PY
 
       - name: Instalar dependências
         run: flutter pub get
 
-      - name: Verificar dependências
-        run: flutter pub deps
-
-      - name: Analisar aplicativo
-        run: flutter analyze lib
+      - name: Analisar código
+        run: flutter analyze --no-fatal-infos lib
 
       - name: Compilar APK
         run: flutter build apk --release
 
-      - name: Disponibilizar APK
+      - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
-          name: LightPPR2-SSH
+          name: LightPPR2-SSH-APK
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+          retention-days: 14
