@@ -1,574 +1,276 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'package:xterm/xterm.dart';
+import 'package:xterm/flutter.dart';
 
 void main() {
-  runApp(MaterialApp(
-    debugShowCheckedModeBanner: false,
-    theme: ThemeData.dark(useMaterial3: true),
-    darkTheme: ThemeData.dark(useMaterial3: true),
-    themeMode: ThemeMode.dark,
-    home: const HomeScreen(),
-  ));
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const SshTerminalApp());
 }
 
-class SshSessionModel {
-  String name;
-  String host;
-  int port;
-  String username;
-  String password;
+class SshTerminalApp extends StatelessWidget {
+  const SshTerminalApp({super.key});
 
-  SshSessionModel({
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'LightPPR2 SSH',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF00D9A6),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF090D12),
+        useMaterial3: true,
+      ),
+      home: const SessionsScreen(),
+    );
+  }
+}
+
+const _secureStorage = FlutterSecureStorage();
+const _sessionsKey = 'ssh_sessions_v2';
+
+class SshProfile {
+  final String id;
+  final String name;
+  final String host;
+  final int port;
+  final String username;
+
+  const SshProfile({
+    required this.id,
     required this.name,
     required this.host,
     required this.port,
     required this.username,
-    required this.password,
   });
 
   Map<String, dynamic> toJson() => {
+        'id': id,
         'name': name,
         'host': host,
         'port': port,
         'username': username,
-        'password': password,
       };
 
-  factory SshSessionModel.fromJson(Map<String, dynamic> json) => SshSessionModel(
-        name: json['name'] as String,
-        host: json['host'] as String,
-        port: (json['port'] as num?)?.toInt() ?? 22,
-        username: json['username'] as String,
-        password: (json['password'] as String?) ?? '',
-      );
+  factory SshProfile.fromJson(Map<String, dynamic> json) {
+      return SshProfile(
+      id: (json['id'] as String?) ??
+          DateTime.now().microsecondsSinceEpoch.toString(),
+      name: (json['name'] as String?) ?? 'SSH',
+      host: (json['host'] as String?) ?? '',
+      port: (json['port'] as num?)?.toInt() ?? 22,
+      username: (json['username'] as String?) ?? '',
+    );
+  }
 }
 
-// ───────────────────────── TELA INICIAL ─────────────────────────
-
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+class SessionsScreen extends StatefulWidget {
+  const SessionsScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<SessionsScreen> createState() => _SessionsScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  List<SshSessionModel> sessions = [];
-  int? selectedIndex;
+class _SessionsScreenState extends State<SessionsScreen> {
+  final List<SshProfile> _profiles = [];
+  bool _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadSessions();
+    _loadProfiles();
   }
 
-  Future<void> _loadSessions() async {
+  Future<void> _loadProfiles() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final String? data = prefs.getString('ssh_sessions');
-      if (data != null) {
-        final List decoded = jsonDecode(data);
-        if (!mounted) return;
-        setState(() {
-          sessions = decoded
-              .map((e) => SshSessionModel.fromJson(Map<String, dynamic>.from(e)))
-              .toList();
-        });
+      final raw = prefs.getString(_sessionsKey) ??
+          prefs.getString('ssh_sessions');
+
+      if (raw != null) {
+        final decoded = jsonDecode(raw) as List<dynamic>;
+        for (final item in decoded) {
+          final map = Map<String, dynamic>.from(item as Map);
+          final legacyPassword = map['password'] as String?;
+          final profile = SshProfile.fromJson(map);
+
+          if (legacyPassword != null && legacyPassword.isNotEmpty) {
+            await _secureStorage.write(
+              key: 'ssh_password_${profile.id}',
+              value: legacyPassword,
+            );
+          }
+
+          if (profile.host.isNotEmpty && profile.username.isNotEmpty) {
+            _profiles.add(profile);
+          }
+        }
+        await _saveProfiles();
+        await prefs.remove('ssh_sessions');
       }
-    } catch (_) {
-      // dados corrompidos: começa vazio
+    } catch (e) {
+      _showMessage('Não foi possível carregar as sessões: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _saveSessions() async {
+  Future<void> _saveProfiles() async {
     final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(sessions.map((e) => e.toJson()).toList());
-    await prefs.setString('ssh_sessions', encoded);
+    await prefs.setString(
+      _sessionsKey,
+      jsonEncode(_profiles.map((p) => p.toJson()).toList()),
+    );
   }
 
-  void _openRegisterDialog() {
-    final nameCtrl = TextEditingController();
-    final hostCtrl = TextEditingController();
-    final portCtrl = TextEditingController(text: '22');
-    final userCtrl = TextEditingController();
-    final passCtrl = TextEditingController();
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
 
-    showDialog(
+  Future<void> _addProfile() async {
+    final name = TextEditingController();
+    final host = TextEditingController();
+    final port = TextEditingController(text: '22');
+    final username = TextEditingController();
+    final password = TextEditingController();
+
+    final result = await showDialog<SshProfile>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Registrar Sessão SSH'),
+        title: const Text('Nova conexão SSH'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Nome (ex: Meu PC)')),
-              TextField(controller: hostCtrl, keyboardType: TextInputType.url, decoration: const InputDecoration(labelText: 'IP SSH (ex: 192.168.1.10)')),
-              TextField(controller: portCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Porta')),
-              TextField(controller: userCtrl, decoration: const InputDecoration(labelText: 'Usuário')),
-              TextField(controller: passCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Senha')),
+              TextField(controller: name, decoration: const InputDecoration(labelText: 'Nome')),
+              TextField(
+                controller: host,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(labelText: 'Host / IP'),
+              ),
+              TextField(
+                controller: port,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Porta'),
+              ),
+              TextField(controller: username, decoration: const InputDecoration(labelText: 'Usuário')),
+              TextField(
+                controller: password,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Senha'),
+              ),
             ],
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancelar')),
-          ElevatedButton(
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
             onPressed: () {
-              if (hostCtrl.text.trim().isEmpty || userCtrl.text.trim().isEmpty) return;
-              setState(() {
-                sessions.add(SshSessionModel(
-                  name: nameCtrl.text.trim().isEmpty ? hostCtrl.text.trim() : nameCtrl.text.trim(),
-                  host: hostCtrl.text.trim(),
-                  port: int.tryParse(portCtrl.text.trim()) ?? 22,
-                  username: userCtrl.text.trim(),
-                  password: passCtrl.text,
-                ));
-              });
-              _saveSessions();
-              Navigator.pop(dialogContext);
+              final parsedPort = int.tryParse(port.text.trim());
+              if (host.text.trim().isEmpty ||
+                  username.text.trim().isEmpty ||
+                  parsedPort == null ||
+                  parsedPort < 1 ||
+                  parsedPort > 65535) {
+                return;
+              }
+
+              final id = DateTime.now().microsecondsSinceEpoch.toString();
+              Navigator.pop(
+                dialogContext,
+                SshProfile(
+                  id: id,
+                  name: name.text.trim().isEmpty
+                      ? host.text.trim()
+                      : name.text.trim(),
+                  host: host.text.trim(),
+                  port: parsedPort,
+                  username: username.text.trim(),
+                ),
+              );
             },
-            child: const Text('Registrar'),
+            child: const Text('Salvar'),
           ),
         ],
       ),
-    ).whenComplete(() {
-      nameCtrl.dispose();
-      hostCtrl.dispose();
-      portCtrl.dispose();
-      userCtrl.dispose();
-      passCtrl.dispose();
-    });
+    );
+
+    if (result != null) {
+      await _secureStorage.write(
+        key: 'ssh_password_${result.id}',
+        value: password.text,
+      );
+      setState(() => _profiles.add(result));
+      await _saveProfiles();
+    }
+
+    name.dispose();
+    host.dispose();
+    port.dispose();
+    username.dispose();
+    password.dispose();
   }
 
-  Future<void> _confirmDelete(int index) async {
-    final ok = await showDialog<bool>(
+  Future<void> _deleteProfile(SshProfile profile) async {
+    final confirmed = await showDialog<bool>(
       context: context,
-      builder: (c) => AlertDialog(
-        title: const Text('Remover sessão?'),
-        content: Text(sessions[index].name),
+      builder: (context) => AlertDialog(
+        title: const Text('Remover conexão?'),
+        content: Text(profile.name),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancelar')),
-          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('Remover')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remover'),
+          ),
         ],
       ),
     );
-    if (ok != true) return;
-    setState(() {
-      sessions.removeAt(index);
-      if (selectedIndex == index) {
-        selectedIndex = null;
-      } else if (selectedIndex != null && selectedIndex! > index) {
-        selectedIndex = selectedIndex! - 1;
-      }
-    });
-    _saveSessions();
+
+    if (confirmed != true) return;
+    setState(() => _profiles.removeWhere((p) => p.id == profile.id));
+    await _secureStorage.delete(key: 'ssh_password_${profile.id}');
+    await _saveProfiles();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Controle PC via SSH')),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: sessions.isEmpty
-                  ? const Center(child: Text('Nenhuma sessão salva.\nClique em Registrar abaixo.', textAlign: TextAlign.center))
-                  : ListView.builder(
-                      itemCount: sessions.length,
-                      itemBuilder: (context, index) {
-                        final s = sessions[index];
-                        final isSelected = selectedIndex == index;
-                        return ListTile(
-                          selected: isSelected,
-                          selectedTileColor: Colors.blue.withValues(alpha: 0.2),
-                          leading: Icon(isSelected ? Icons.radio_button_checked : Icons.radio_button_off),
-                          title: Text(s.name),
-                          subtitle: Text('${s.username}@${s.host}:${s.port}'),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete, color: Colors.redAccent),
-                            onPressed: () => _confirmDelete(index),
-                          ),
-                          onTap: () => setState(() => selectedIndex = index),
-                        );
-                      },
-                    ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _openRegisterDialog,
-                      icon: const Icon(Icons.add),
-                      label: const Text('Registrar'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: selectedIndex == null
-                          ? null
-                          : () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) => ControlScreen(session: sessions[selectedIndex!]),
-                                ),
-                              );
-                            },
-                      icon: const Icon(Icons.login),
-                      label: const Text('Logar'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+  Future<void> _openProfile(SshProfile profile) async {
+    final password = await _secureStorage.read(
+      key: 'ssh_password_${profile.id}',
     );
-  }
-}
-
-// ───────────────────────── TELA DE CONTROLE ─────────────────────────
-
-enum LogKind { info, input, output, error }
-
-class _LogLine {
-  final String text;
-  final LogKind kind;
-  _LogLine(this.text, this.kind);
-}
-
-class _Shortcut {
-  final String label;
-  final IconData icon;
-  final Color color;
-  final String command;
-  final bool confirm;
-  final bool expectDisconnect;
-
-  const _Shortcut({
-    required this.label,
-    required this.icon,
-    required this.color,
-    required this.command,
-    this.confirm = false,
-    this.expectDisconnect = false,
-  });
-}
-
-class ControlScreen extends StatefulWidget {
-  final SshSessionModel session;
-  const ControlScreen({super.key, required this.session});
-
-  @override
-  State<ControlScreen> createState() => _ControlScreenState();
-}
-
-class _ControlScreenState extends State<ControlScreen> {
-  static const double _btnWidth = 298;
-  static const double _btnHeight = 120;
-  static const int _maxLogLines = 500;
-
-  SSHClient? _client;
-  bool _connected = false;
-  bool _connecting = false;
-  bool _busy = false;
-
-  final List<_LogLine> _log = [];
-  final TextEditingController _inputCtrl = TextEditingController();
-  final ScrollController _scrollCtrl = ScrollController();
-  final FocusNode _inputFocus = FocusNode();
-
-  // O SSH do Windows roda na sessão 0 (sem tela). Para o Explorer aparecer
-  // na área de trabalho usamos uma tarefa agendada interativa (/it).
-  late final List<_Shortcut> _shortcuts = [
-    _Shortcut(
-      label: 'Abrir Explorer',
-      icon: Icons.folder_open,
-      color: Colors.blue,
-      command: 'schtasks /create /tn "RemoteExplorer" /tr "explorer.exe" /sc once '
-          '/st 00:00 /ru "${widget.session.username}" /it /f && '
-          'schtasks /run /tn "RemoteExplorer"',
-    ),
-    const _Shortcut(
-      label: 'Reiniciar PC',
-      icon: Icons.restart_alt,
-      color: Colors.orange,
-      command: 'shutdown /f /r /t 0',
-      confirm: true,
-      expectDisconnect: true,
-    ),
-    const _Shortcut(
-      label: 'Desligar PC',
-      icon: Icons.power_settings_new,
-      color: Colors.red,
-      command: 'shutdown /f /s /t 0',
-      confirm: true,
-      expectDisconnect: true,
-    ),
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _connect();
-  }
-
-  @override
-  void dispose() {
-    _client?.close();
-    _inputCtrl.dispose();
-    _scrollCtrl.dispose();
-    _inputFocus.dispose();
-    super.dispose();
-  }
-
-  // ── log ──
-
-  void _addLog(String text, LogKind kind) {
     if (!mounted) return;
-    setState(() {
-      _log.add(_LogLine(text, kind));
-      if (_log.length > _maxLogLines) {
-        _log.removeRange(0, _log.length - _maxLogLines);
-      }
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
-      }
-    });
-  }
 
-  String _decode(List<int> bytes) {
-    if (bytes.isEmpty) return '';
-    try {
-      return utf8.decode(bytes);
-    } catch (_) {
-      return latin1.decode(bytes);
+    if (password == null || password.isEmpty) {
+      _showMessage('Senha não cadastrada. Remova e registre a sessão novamente.');
+      return;
     }
-  }
 
-  // ── conexão ──
-
-  Future<bool> _connect() async {
-    final current = _client;
-    if (_connected && current != null && !current.isClosed) return true;
-    if (_connecting) return false;
-
-    setState(() => _connecting = true);
-    _addLog('Conectando em ${widget.session.host}:${widget.session.port}...', LogKind.info);
-    SSHClient? client;
-    try {
-      final socket = await SSHSocket.connect(
-        widget.session.host,
-        widget.session.port,
-        timeout: const Duration(seconds: 8),
-      );
-      client = SSHClient(
-        socket,
-        username: widget.session.username,
-        onPasswordRequest: () => widget.session.password,
-      );
-      await client.authenticated.timeout(const Duration(seconds: 10));
-
-      final c = client;
-      c.done.then((_) {
-        if (mounted && _client == c) {
-          setState(() => _connected = false);
-          _addLog('Conexão encerrada.', LogKind.info);
-        }
-      }, onError: (_) {
-        if (mounted && _client == c) setState(() => _connected = false);
-      });
-
-      _client = client;
-      if (mounted) setState(() => _connected = true);
-      _addLog('Conectado.', LogKind.info);
-      return true;
-    } catch (e) {
-      client?.close();
-      if (mounted) setState(() => _connected = false);
-      _addLog('Falha ao conectar: $e', LogKind.error);
-      return false;
-    } finally {
-      if (mounted) setState(() => _connecting = false);
-    }
-  }
-
-  // ── execução de comandos ──
-
-  Future<void> _exec(String command, {bool expectDisconnect = false}) async {
-    command = command.trim();
-    if (command.isEmpty || _busy) return;
-
-    setState(() => _busy = true);
-    _addLog('> $command', LogKind.input);
-
-    try {
-      if (!await _connect()) return;
-
-      final session = await _client!.execute(command);
-      final outBytes = <int>[];
-      final errBytes = <int>[];
-      session.stdout.listen(outBytes.addAll, onError: (_) {});
-      session.stderr.listen(errBytes.addAll, onError: (_) {});
-
-      try {
-        await session.done.timeout(const Duration(seconds: 15));
-        await Future.delayed(const Duration(milliseconds: 50));
-      } on TimeoutException {
-        _addLog('(sem fim em 15s; o comando pode continuar rodando no PC)', LogKind.info);
-        session.close();
-      }
-
-      final out = _decode(outBytes).trimRight();
-      final err = _decode(errBytes).trimRight();
-      if (out.isNotEmpty) _addLog(out, LogKind.output);
-      if (err.isNotEmpty) _addLog(err, LogKind.error);
-
-      final code = session.exitCode;
-      if (out.isEmpty && err.isEmpty) {
-        _addLog(code == null || code == 0 ? '(ok, sem saída)' : '(código de saída: $code)', LogKind.info);
-      } else if (code != null && code != 0) {
-        _addLog('(código de saída: $code)', LogKind.info);
-      }
-    } catch (e) {
-      if (expectDisconnect) {
-        _addLog('Comando enviado. O PC está desligando/reiniciando.', LogKind.info);
-      } else {
-        _addLog('Erro SSH: $e', LogKind.error);
-      }
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _runShortcut(_Shortcut s) async {
-    if (s.confirm) {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (c) => AlertDialog(
-          title: Text(s.label),
-          content: const Text('Tem certeza?'),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancelar')),
-            ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text('Confirmar')),
-          ],
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TerminalScreen(
+          profile: profile,
+          password: password,
         ),
-      );
-      if (ok != true) return;
-    }
-    await _exec(s.command, expectDisconnect: s.expectDisconnect);
-  }
-
-  void _sendTyped() {
-    final text = _inputCtrl.text;
-    if (text.trim().isEmpty || _busy) return;
-    _inputCtrl.clear();
-    final lower = text.toLowerCase();
-    _exec(
-      text,
-      expectDisconnect: lower.contains('shutdown') || lower.contains('restart-computer'),
-    );
-    _inputFocus.requestFocus();
-  }
-
-  // ── UI ──
-
-  Color _colorFor(LogKind k) {
-    switch (k) {
-      case LogKind.input:
-        return Colors.cyanAccent;
-      case LogKind.output:
-        return Colors.white;
-      case LogKind.error:
-        return Colors.redAccent;
-      case LogKind.info:
-        return Colors.amberAccent;
-    }
-  }
-
-  Widget _buildShortcutButton(_Shortcut s) {
-    return SizedBox(
-      width: _btnWidth,
-      height: _btnHeight,
-      child: ElevatedButton(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: s.color,
-          foregroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        ),
-        onPressed: _busy ? null : () => _runShortcut(s),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(s.icon, size: 38),
-            const SizedBox(height: 8),
-            Text(s.label, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTerminal() {
-    const mono = TextStyle(fontFamily: 'monospace', fontSize: 13, height: 1.3);
-    return Container(
-      color: const Color(0xFF0C0C0C),
-      child: Column(
-        children: [
-          Expanded(
-            child: SelectionArea(
-              child: ListView.builder(
-                controller: _scrollCtrl,
-                padding: const EdgeInsets.all(10),
-                itemCount: _log.length,
-                itemBuilder: (context, i) {
-                  final line = _log[i];
-                  return Text(line.text, style: mono.copyWith(color: _colorFor(line.kind)));
-                },
-              ),
-            ),
-          ),
-          if (_busy) const LinearProgressIndicator(minHeight: 2),
-          const Divider(height: 1, color: Colors.white24),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Row(
-              children: [
-                Text('>', style: mono.copyWith(color: Colors.cyanAccent, fontSize: 16)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _inputCtrl,
-                    focusNode: _inputFocus,
-                    style: mono.copyWith(color: Colors.white, fontSize: 14),
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _sendTyped(),
-                    decoration: const InputDecoration(
-                      hintText: 'Digite um comando...',
-                      border: InputBorder.none,
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.send, color: Colors.cyanAccent),
-                  onPressed: _busy ? null : _sendTyped,
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -577,30 +279,287 @@ class _ControlScreenState extends State<ControlScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.session.name),
+        title: const Text('LightPPR2 SSH'),
         actions: [
-          Icon(
-            Icons.circle,
-            size: 12,
-            color: _connecting
-                ? Colors.amber
-                : (_connected ? Colors.greenAccent : Colors.redAccent),
+          IconButton(
+            onPressed: _addProfile,
+            icon: const Icon(Icons.add),
+            tooltip: 'Adicionar conexão',
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _addProfile,
+        icon: const Icon(Icons.add),
+        label: const Text('Nova conexão'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _profiles.isEmpty
+              ? const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.terminal, size: 56, color: Colors.white38),
+                      SizedBox(height: 12),
+                      Text('Nenhuma conexão cadastrada'),
+                      Text(
+                        'Adicione um servidor SSH para começar.',
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+                  itemCount: _profiles.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final profile = _profiles[index];
+                    return Card(
+                      child: ListTile(
+                        leading: const CircleAvatar(
+                          child: Icon(Icons.dns_outlined),
+                        ),
+                        title: Text(profile.name),
+                        subtitle: Text(
+                          '${profile.username}@${profile.host}:${profile.port}',
+                        ),
+                        onTap: () => _openProfile(profile),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => _deleteProfile(profile),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+class TerminalScreen extends StatefulWidget {
+  final SshProfile profile;
+  final String password;
+
+  const TerminalScreen({
+    super.key,
+    required this.profile,
+    required this.password,
+  });
+
+  @override
+  State<TerminalScreen> createState() => _TerminalScreenState();
+}
+
+class _TerminalScreenState extends State<TerminalScreen> {
+  late final Terminal _terminal;
+  SSHClient? _client;
+  SSHSession? _shell;
+  StreamSubscription<List<int>>? _stdoutSubscription;
+  StreamSubscription<List<int>>? _stderrSubscription;
+  bool _ctrlLatched = false;
+
+  bool _connecting = false;
+  bool _connected = false;
+  bool _disposed = false;
+  String _status = 'Desconectado';
+
+  @override
+  void initState() {
+    super.initState();
+    _terminal = Terminal(maxLines: 10000);
+    _terminal.onOutput = _sendToShell;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _connect());
+  }
+
+  void _write(String text) {
+    if (_disposed) return;
+    _terminal.write(text);
+  }
+
+  Future<void> _connect() async {
+    if (_connecting || _connected || _disposed) return;
+
+    setState(() {
+      _connecting = true;
+      _status = 'Conectando...';
+    });
+    _write('\x1b[1;36mConectando a ${widget.profile.username}@${widget.profile.host}:${widget.profile.port}...\x1b[0m\r\n');
+
+    SSHClient? client;
+    try {
+      final socket = await SSHSocket.connect(
+        widget.profile.host,
+        widget.profile.port,
+        timeout: const Duration(seconds: 15),
+      );
+
+      client = SSHClient(
+        socket,
+        username: widget.profile.username,
+        onPasswordRequest: () => widget.password,
+      );
+
+      await client.authenticated.timeout(const Duration(seconds: 20));
+      if (_disposed) {
+        client.close();
+        return;
+      }
+
+      _client = client;
+
+      // Uma shell com PTY mantém o mesmo processo e o mesmo diretório
+      // entre comandos, ao contrário de SSHClient.execute().
+      final shell = await client.shell(
+        pty: const SSHPtyConfig(
+          type: 'xterm-256color',
+          width: 80,
+          height: 24,
+        ),
+      );
+
+      if (_disposed) {
+        shell.close();
+        client.close();
+        return;
+      }
+
+      _shell = shell;
+      _stdoutSubscription = shell.stdout.listen(
+        (data) => _write(utf8.decode(data, allowMalformed: true)),
+        onError: (error) => _handleDisconnect('Erro na saída SSH: $error'),
+        onDone: () => _handleDisconnect('Shell encerrado pelo servidor.'),
+      );
+      _stderrSubscription = shell.stderr.listen(
+        (data) => _write(utf8.decode(data, allowMalformed: true)),
+        onError: (error) => _handleDisconnect('Erro stderr: $error'),
+      );
+
+      setState(() {
+        _connected = true;
+        _connecting = false;
+        _status = 'Conectado';
+      });
+      _write('\r\n\x1b[1;32mConexão SSH estabelecida.\x1b[0m\r\n');
+    } catch (e) {
+      client?.close();
+      if (!_disposed && mounted) {
+        setState(() {
+          _connected = false;
+          _connecting = false;
+          _status = 'Falha na conexão';
+        });
+        _write('\r\n\x1b[1;31mFalha SSH: $e\x1b[0m\r\n');
+      }
+    }
+  }
+
+  void _sendToShell(String data) {
+    final shell = _shell;
+    if (shell == null || !_connected) return;
+
+    try {
+      var outgoing = data;
+      if (_ctrlLatched && data.length == 1) {
+        final code = data.toLowerCase().codeUnitAt(0);
+        if (code >= 97 && code <= 122) {
+          outgoing = String.fromCharCode(code - 96);
+        }
+        _ctrlLatched = false;
+      }
+      shell.stdin.add(Uint8List.fromList(utf8.encode(outgoing))); 
+    } catch (e) {
+      _write('\r\n\x1b[31mFalha ao enviar dados: $e\x1b[0m\r\n');
+    }
+  }
+
+  void _handleDisconnect(String message) {
+    if (_disposed || !mounted) return;
+    setState(() {
+      _connected = false;
+      _connecting = false;
+      _status = 'Desconectado';
+    });
+    _write('\r\n\x1b[1;33m$message\x1b[0m\r\n');
+  }
+
+  Future<void> _disconnect() async {
+    await _stdoutSubscription?.cancel();
+    await _stderrSubscription?.cancel();
+    _stdoutSubscription = null;
+    _stderrSubscription = null;
+
+    _shell?.close();
+    _shell = null;
+    _client?.close();
+    _client = null;
+
+    if (mounted) {
+      setState(() {
+        _connected = false;
+        _connecting = false;
+        _status = 'Desconectado';
+      });
+    }
+  }
+
+  Future<void> _reconnect() async {
+    await _disconnect();
+    _write('\r\n\x1b[1;36mTentando reconectar...\x1b[0m\r\n');
+    await _connect();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _stdoutSubscription?.cancel();
+    _stderrSubscription?.cancel();
+    _shell?.close();
+    _client?.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = _connected
+        ? Colors.greenAccent
+        : (_connecting ? Colors.amber : Colors.redAccent);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.profile.name, style: const TextStyle(fontSize: 16)),
+            Text(
+              '${widget.profile.username}@${widget.profile.host}',
+              style: const TextStyle(fontSize: 11, color: Colors.white54),
+            ),
+          ],
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Center(
+              child: Row(
+                children: [
+                  Icon(Icons.circle, size: 10, color: statusColor),
+                  const SizedBox(width: 6),
+                  Text(_status, style: const TextStyle(fontSize: 11)),
+                ],
+              ),
+            ),
           ),
           IconButton(
             tooltip: 'Reconectar',
+            onPressed: _connecting ? null : _reconnect,
             icon: const Icon(Icons.refresh),
-            onPressed: _connecting
-                ? null
-                : () {
-                    _client?.close();
-                    _connected = false;
-                    _connect();
-                  },
           ),
           IconButton(
             tooltip: 'Limpar terminal',
-            icon: const Icon(Icons.delete_sweep),
-            onPressed: () => setState(_log.clear),
+            onPressed: () => _terminal.write('\x1b[2J\x1b[H'),
+            icon: const Icon(Icons.cleaning_services_outlined),
           ),
         ],
       ),
@@ -608,22 +567,63 @@ class _ControlScreenState extends State<ControlScreen> {
         child: Column(
           children: [
             Expanded(
-              flex: 5,
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
-                child: Center(
-                  child: Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    alignment: WrapAlignment.center,
-                    children: _shortcuts.map(_buildShortcutButton).toList(),
-                  ),
+              child: Container(
+                color: const Color(0xFF050708),
+                child: TerminalView(
+                  _terminal,
+                  autofocus: true,
                 ),
               ),
             ),
-            Expanded(flex: 4, child: _buildTerminal()),
+            if (_connecting) const LinearProgressIndicator(minHeight: 2),
+            Container(
+              height: 46,
+              decoration: const BoxDecoration(
+                color: Color(0xFF111820),
+                border: Border(top: BorderSide(color: Colors.white12)),
+              ),
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                children: [
+                  _keyButton('ESC', '\x1b'),
+                  _keyButton('TAB', '\t'),
+                  _keyButton('CTRL', '__CTRL__'),
+                  _keyButton('↑', '\x1b[A'),
+                  _keyButton('↓', '\x1b[B'),
+                  _keyButton('←', '\x1b[D'),
+                  _keyButton('→', '\x1b[C'),
+                  _keyButton('|', '|'),
+                  _keyButton('/', '/'),
+                  _keyButton('~', '~'),
+                ],
+              ),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _keyButton(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+      child: OutlinedButton(
+        style: OutlinedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          minimumSize: const Size(42, 32),
+          visualDensity: VisualDensity.compact,
+        ),
+        onPressed: !_connected
+            ? null
+            : () {
+                if (value == '__CTRL__') {
+                  setState(() => _ctrlLatched = !_ctrlLatched);
+                  return;
+                }
+                _sendToShell(value);
+              },
+        child: Text(label, style: const TextStyle(fontSize: 12)),
       ),
     );
   }
