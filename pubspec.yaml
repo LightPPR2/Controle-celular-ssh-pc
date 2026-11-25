@@ -1,5 +1,5 @@
 name: controle_celular_ssh_pc
-description: App para controlar o PC via SSH.
+description: App LightPPR2 para controle de computadores via SSH.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,8 +9,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   shared_preferences: ^2.3.2
   dartssh2: ^2.11.0
+  xterm: ^4.0.0
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:
