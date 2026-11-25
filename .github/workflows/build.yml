@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Baixar repositório
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Configurar Flutter
@@ -33,8 +33,8 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          manifest = Path("android/app/src/main/AndroidManifest.xml")
-          content = manifest.read_text()
+          path = Path("android/app/src/main/AndroidManifest.xml")
+          content = path.read_text()
 
           permission = '<uses-permission android:name="android.permission.INTERNET"/>'
 
@@ -50,14 +50,17 @@ jobs:
               'android:label="LightPPR2 SSH"'
           )
 
-          manifest.write_text(content)
+          path.write_text(content)
           PY
 
       - name: Instalar dependências
         run: flutter pub get
 
-      - name: Analisar código
-        run: flutter analyze
+      - name: Verificar dependências
+        run: flutter pub deps
+
+      - name: Analisar aplicativo
+        run: flutter analyze lib
 
       - name: Compilar APK
         run: flutter build apk --release
