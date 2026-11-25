@@ -1,17 +1,20 @@
-name: controle_pc_ssh
-description: Controle PC via SSH
+name: controle_celular_ssh_pc
+description: App para controlar o PC via SSH.
 publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.6.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  shared_preferences: ^2.3.0
-  dartssh2: ^2.9.0
+  shared_preferences: ^2.3.2
+  dartssh2: ^2.11.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true
-  
