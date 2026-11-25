@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
-import 'package:xterm/flutter.dart';
+import 'package:xterm/ui.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
